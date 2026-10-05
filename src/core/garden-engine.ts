@@ -1,4 +1,4 @@
-import type { Emotion, EmotionEntry, GardenSnapshot, GrowthStage, Plant } from './models';
+import type { ActivityType, Emotion, EmotionEntry, GardenActivity, GardenSnapshot, GrowthStage, Plant } from './models';
 import { EMOTION_META, EMOTIONS } from './models';
 
 const day = 86400000;
@@ -23,6 +23,23 @@ export function syncPlants(entries: EmotionEntry[], previous: Plant[] = []): Pla
     return { id: existing?.id ?? `plant-${emotion}`, emotion, plantedAt: own[0].date, lastWatered: own[own.length - 1].date, streak, stage: stageFor(streak), status: streak ? '繁茂' : '枯萎', entryIds: own.map((item) => item.id) };
   });
 }
+const STAGE_RANK: Record<GrowthStage, number> = { 种子: 0, 发芽: 1, 开花: 2, 结果: 3 };
+const STAGE_ACTIVITY: Partial<Record<GrowthStage, ActivityType>> = { 发芽: '发芽', 开花: '开花', 结果: '结果' };
+let activitySeq = 0;
+function newActivityId() { return `activity-${Date.now()}-${(activitySeq += 1)}-${Math.random().toString(36).slice(2, 7)}`; }
+// 重算植物，并与重算前的状态对比，自动生成生命周期动态：
+// 新出现的植物记「种下」；连续天数跨级时只记当前达成的那一级；繁茂转枯萎记「枯萎」；复活不补记。
+export function growGarden(entries: EmotionEntry[], previous: Plant[] = [], activities: GardenActivity[] = [], date = new Date().toISOString().slice(0, 10)): { plants: Plant[]; activities: GardenActivity[] } {
+  const plants = syncPlants(entries, previous);
+  const fresh: GardenActivity[] = [];
+  for (const plant of plants) {
+    const before = previous.find((item) => item.id === plant.id);
+    if (!before) { fresh.push({ id: newActivityId(), plantId: plant.id, emotion: plant.emotion, type: '种下', date: plant.plantedAt }); continue; }
+    if (before.status === '繁茂' && plant.status === '枯萎') fresh.push({ id: newActivityId(), plantId: plant.id, emotion: plant.emotion, type: '枯萎', date });
+    else if (plant.status === '繁茂') { const reached = STAGE_ACTIVITY[plant.stage]; if (reached && STAGE_RANK[plant.stage] > STAGE_RANK[before.stage]) fresh.push({ id: newActivityId(), plantId: plant.id, emotion: plant.emotion, type: reached, date }); }
+  }
+  return { plants, activities: [...activities, ...fresh] };
+}
 export function createEntry(emotion: Emotion, note: string, intensity: number, date = new Date().toISOString().slice(0, 10)): EmotionEntry { return { id: `emotion-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, date, emotion, note: note.trim() || EMOTION_META[emotion].hint, intensity: Math.min(5, Math.max(1, Number(intensity) || 3)) }; }
 export function annualReport(entries: EmotionEntry[]) {
   const counts = EMOTIONS.map((emotion) => ({ emotion, count: entries.filter((item) => item.emotion === emotion).length })).sort((a, b) => b.count - a.count);
@@ -33,6 +50,13 @@ export function annualReport(entries: EmotionEntry[]) {
 export function sampleSnapshot(): GardenSnapshot {
   const today = new Date(); const entries: EmotionEntry[] = [];
   const seed: Emotion[] = ['喜悦', '喜悦', '平静', '平静', '平静', '平静', '喜悦', '忧伤', '焦虑', '平静', '喜悦'];
-  seed.forEach((emotion, index) => { const date = new Date(today.getTime() - (seed.length - index - 1) * day).toISOString().slice(0, 10); entries.push(createEntry(emotion, index % 2 ? '今天注意到了自己的节奏。' : '给这一天留下一颗种子。', (index % 5) + 1, date)); });
-  return { entries, plants: syncPlants(entries) };
+  let plants: Plant[] = []; let activities: GardenActivity[] = [];
+  seed.forEach((emotion, index) => {
+    const date = new Date(today.getTime() - (seed.length - index - 1) * day).toISOString().slice(0, 10);
+    const entry = createEntry(emotion, index % 2 ? '今天注意到了自己的节奏。' : '给这一天留下一颗种子。', (index % 5) + 1, date);
+    entries.push(entry);
+    // 逐日重算，让动态经由阶段对比自然产生，而不是回填历史
+    ({ plants, activities } = growGarden(entries, plants, activities, date));
+  });
+  return { entries, plants, activities };
 }
